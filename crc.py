@@ -65,7 +65,6 @@ class CRC_GT02:
         for c in str:
             crc = self._update_crc(crc, ord(c))
         crc = ~crc & 0xffff
-        print (format(crc, '04x'))
         return crc.to_bytes(2, byteorder='big')
 
     def crcb(self, i):
@@ -80,7 +79,6 @@ class CRC_GT02:
         for c in i:
             crc = self._update_crc(crc, c)
         crc = ~crc & 0xffff
-        print (format(crc, '04x'))
         return crc.to_bytes(2, byteorder='big')
     
 
