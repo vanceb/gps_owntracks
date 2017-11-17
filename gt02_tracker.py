@@ -112,6 +112,68 @@ def parse_location(data):
     return info
 
 
+def parse_status(data):
+    log = logging.getLogger(__name__)
+    log.debug("Parsing status packet")
+    # Extract
+    info = data[0]
+    voltage = data[1]
+    signal = data[2]
+    alarm_lang = data[3]
+    # Bit data
+    if info & 0x80:
+        immobilised = True
+    else:
+        immobilised = False
+
+    if info & 0x40:
+        tracking = True
+    else:
+        tracking = False
+
+    alarm = (info & 0x38) >> 3
+
+    if info & 0x04:
+        charging = True
+    else:
+        charging = False
+
+    if info & 0x02:
+        ignition = True
+    else:
+        ignition = False
+
+    if info & 0x01:
+        active = True
+    else:
+        active = False
+
+    log.info("Vehicle:" +
+             " Immobilised - " + str(immobilised) +
+             " Ingition on - " + str(ignition) +
+             " Alarm 1 - " + str(alarm) +
+             " Alarm 2 - " + str(alarm_lang)
+             )
+    log.info("System:"
+             " Active - " + str(active) +
+             " Tracking - " + str(tracking) +
+             " Charging - " + str(charging) +
+             " Voltage - " + str(voltage) +
+             " Signal - " + str(signal)
+             )
+    info = {
+            'active': active,
+            'tracking': tracking,
+            'charging': charging,
+            'voltage': voltage,
+            'signal': signal,
+            'immobilised': immobilised,
+            'ignition': ignition,
+            'alarm1': alarm,
+            'alarm2': alarm_lang
+            }
+    return info
+
 
 class ThreadedRequestHandler(socketserver.BaseRequestHandler):
 
@@ -193,11 +255,12 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                         elif protocol == 0x12:
                             # Location Data
                             log.debug("Location packet received")
-                            parse_location(payload)
+                            info = parse_location(payload)
                             
                         elif protocol == 0x13:
                             # Status Information
-                            log.warning("Status packet received - NOT IMPLEMENTED")
+                            log.warning("Status packet received")
+                            info = parse_status(payload)
                         elif protocol == 0x15:
                             # String Information
                             log.warning("String packet received - NOT IMPLEMENTED")
