@@ -2,11 +2,115 @@ import socket
 import threading
 import socketserver
 import select
+import struct
 import logging
+import datetime
 from crc import CRC_GT02
 
 
 THREAD_TIMEOUT = 120  # seconds
+
+
+def parse_location(data):
+    log = logging.getLogger(__name__)
+    log.debug("Parsing location packet")
+    # Date time
+    year = data[0] + 2000
+    month = data[1]
+    day = data[2]
+    hour = data[3]
+    minute = data[4]
+    second = data[5]
+    dt = datetime.datetime(year, month, day, hour, minute, second)
+    log.debug("Datetime: " + str(dt))
+    # GPS Quality
+    bit_length = (data[6] & 0xf0) >> 4
+    num_sats = data[6] & 0x0f
+    log.debug("GPS Quality: Bitlength = " + str(bit_length) +
+              "  Number of satellites = " + str(num_sats))
+    # Speed
+    speed = data[15]
+    if speed < 1:
+        log.debug("Moving at " + str(speed) + " kph")
+    else:
+        log.debug("Not moving")
+    #Status and direction
+    status = (data[16] << 8) & data[17]
+    direction_deg = status & 0x3f
+    log.debug("Heading: " + str(direction_deg) + "°")
+    if status & 0x0400:
+        lat_hemi = 'S'
+    else:
+        lat_hemi = 'N'
+    if status & 0x0800:
+        lon_hemi = 'E'
+    else:
+        lon_hemi = 'W'
+    if status & 0x1000: #TODO:  Check that this is correct
+        gps_pos_ok = True
+    else:
+        gps_pos_ok = False
+    if status & 0x2000:
+        gps_pos = "Differential"
+    else:
+        gps_pos = "Live"
+    log.debug("GPS Status: Fix " + str(gps_pos_ok) + " data is " + gps_pos) 
+    # Lat / Lon
+    lat_raw = struct.unpack('>I', data[7:11])[0]
+    lon_raw = struct.unpack('>I', data[11:15])[0]
+    lat_dd = lat_raw / (30000 * 60)
+    lon_dd = lon_raw / (30000 * 60)
+    lat_deg = int(lat_dd)
+    lat_min = (lat_dd - lat_deg) * 60
+    lon_deg = int(lon_dd)
+    lon_min = (lon_dd - lon_deg) * 60
+    loc_txt = str(lat_deg) + "° "
+    loc_txt += format(lat_min, '02.4f') + "'" + lat_hemi + " " 
+    loc_txt += str(lon_deg) + "° "
+    loc_txt += format(lon_min, '02.4f') + "'" + lon_hemi
+    # Correct the decimal degrees sign if needed
+    if lat_hemi == 'S':
+        lat_dd = -lat_dd
+    if lon_hemi == 'W':
+        lon_dd = -lon_dd
+    log.debug("DD: " + str(lat_dd) + " " + str(lon_dd))
+    # Log position and movement
+    if speed < 1:
+        log.info("Static Location: " + loc_txt)
+    else:
+        log.info("Moving at " + str(speed) + 
+                 " kph, heading " + str(direction_deg) + 
+                 ". Position " + loc_txt)
+
+    # GSM Info
+    mcc = (data[17] << 8) & data[18]
+    mnc = data[19]
+    lac = (data[20] << 8) & data[21]
+    cell_id = (data[22] << 8) & data[23]
+    log.debug("GSM Data:" +
+              " MCC: 0x" + format(mcc, '04x') +
+              " MNC: 0x" + format(mnc, '02x') +
+              " LAC: 0x" + format(lac, '04x') + 
+              " Cell ID: 0x" + format(cell_id, '04x')
+              )
+    info = {
+            'datetime': dt,
+            'lat': lat_dd,
+            'lon': lon_dd,
+            'position': loc_txt,
+            'speed': speed,
+            'heading': direction_deg,
+            'satellites': num_sats,
+            'locked': gps_pos_ok,
+            'pos_status': gps_pos,
+            'bitlength': bit_length,
+            'cell_id': cell_id,
+            'mcc': mcc,
+            'mnc': mnc,
+            'lac': lac
+            }
+    return info
+
 
 
 class ThreadedRequestHandler(socketserver.BaseRequestHandler):
@@ -22,6 +126,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                 + threading.current_thread().name)
                 
         done = False
+        imei = None
         crc16 = CRC_GT02()
 
         while not done:
@@ -61,8 +166,6 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                     if start != b'\x78\x78':
                         log.error("Bad start to received data packet")
                         bad_data = True
-                    else:
-                        log.debug("Good start bits")
 
                     # Confirm correct data length
                     if length != calc_length:
@@ -70,37 +173,40 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                                   " Calculated: " + str(calc_length) + 
                                   ", Supplied: " +  str(length))
                         bad_data = True
-                    else:
-                        log.debug("Length match")
 
                     # Confirm checksum
                     if calc_crc != crc:
                         log.error("Checksum mismatch -" +
                                   " Calculated: %02x, Supplied: %02x" % (calc_crc, crc))
                         bad_data = True
-                    else:
-                        log.debug("Checksum match")
 
                     if not bad_data:    
                         # Deal with the message content based on the protocol
                         if protocol == 0x01:
                             # Login request
-                            log.info("Login from " + ' '.join(format(x, '02x') for x in payload))
+                            if imei is None:
+                                imei = ''.join(format(x, '02x') for x in payload)
+                                log.info("Login from " + imei)
+                            else:
+                                log.error("Multiple login attempts")
+                                done = True
                         elif protocol == 0x12:
                             # Location Data
-                            log.info("Location packet received")
+                            log.debug("Location packet received")
+                            parse_location(payload)
+                            
                         elif protocol == 0x13:
                             # Status Information
-                            log.info("Status packet received")
+                            log.warning("Status packet received - NOT IMPLEMENTED")
                         elif protocol == 0x15:
                             # String Information
-                            log.info("String packet received")
+                            log.warning("String packet received - NOT IMPLEMENTED")
                         elif protocol == 0x16:
                             # Alarm Information
-                            log.info("Alarm packet received")
+                            log.warning("Alarm packet received - NOT IMPLEMENTED")
                         elif protocol == 0x1A:
                             # GPS query by phone
-                            log.info("GPS query by phone packet received")
+                            log.warning("GPS query by phone packet received - NOT IMPLEMENTED")
                         else:
                             log.error("Unknown protocol: " + str(protocol))
 
