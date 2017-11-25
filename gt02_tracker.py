@@ -9,11 +9,13 @@ import logging
 import datetime
 import time
 import json
+import yaml
 import paho.mqtt.publish as publish
 from crc import CRC_GT02
 
 
 THREAD_TIMEOUT = 120  # seconds
+config = {}  # Global variable for the config
 
 
 def parse_location(data):
@@ -27,7 +29,7 @@ def parse_location(data):
     minute = data[4]
     second = data[5]
     dt = datetime.datetime(year, month, day, hour, minute, second)
-    tst = time.mktime(dt.timetuple())
+    tst = int(time.mktime(dt.timetuple()))
     log.debug("Datetime: " + str(dt))
     # GPS Quality
     bit_length = (data[6] & 0xf0) >> 4
@@ -52,10 +54,10 @@ def parse_location(data):
         lon_hemi = 'E'
     else:
         lon_hemi = 'W'
-    if status & 0x1000:  # TODO:  Check that this is correct
-        gps_pos_ok = True
-    else:
+    if status & 0x1000:
         gps_pos_ok = False
+    else:
+        gps_pos_ok = True
     if status & 0x2000:
         gps_pos = "Differential"
     else:
@@ -201,10 +203,16 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
         done = False
         imei = None
         crc16 = CRC_GT02()
-        tls_settings = {
-               'ca_certs': 'fullchain.pem',
-               'tls_version': ssl.PROTOCOL_TLSv1
-               }
+        broker = config['mqtt']['broker']
+        port = config['mqtt']['port']
+        auth = {
+                'username': config['mqtt']['username'],
+                'password': config['mqtt']['password']
+                }
+        #tls = {
+        #       'ca_certs': 'fullchain.pem',
+        #       'tls_version': ssl.PROTOCOL_TLSv1
+        #       }
 
         while not done:
             log.debug("Blocking on incoming data")
@@ -271,6 +279,12 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                                 imei = ''.join(
                                         format(x, '02x') for x in payload)
                                 log.info("Login from " + imei)
+                                if imei in config['imei']:
+                                    device = config['imei'][imei]['device']
+                                    tid = config['imei'][imei]['tid']
+                                else:
+                                    device = imei
+                                    tid = imei[-2:]
                             else:
                                 log.error("Multiple login attempts")
                                 done = True
@@ -281,7 +295,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                             log.debug("Extracted: " + str(info))
                             owntracks = {
                                          '_type': 'location',
-                                         'tid': 'HX',  # TODO: perform lookup
+                                         'tid': tid,
                                          'imei': imei,
                                          'lat': info['lat'],
                                          'lon': info['lon'],
@@ -293,17 +307,18 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                                 owntracks['acc'] = 10000
                             else:
                                 # This is a guestimate
-                                owntracks['acc'] = 300 / info.satellites
+                                owntracks['acc'] = int(200
+                                        / info['satellites'])
 
                             # Publish to mqtt
                             log.debug("Sending via mqtt: " + str(owntracks))
-                            # TODO Provide config in another file
                             publish.single(
-                                           "owntracks/" + imei + "/HX",
-                                           tls = tls_settings,
-                                           json.dumps(owntracks),
-                                           hostname = 'geo-fun.org',
-                                           port = 8883
+                                           "owntracks/" + device + "/" + tid,
+                                           payload = json.dumps(owntracks),
+                                           #tls = tls,
+                                           auth = auth,
+                                           hostname = broker,
+                                           port = int(port)
                                            )
                             log.debug("Sent successfully")
 
@@ -356,6 +371,12 @@ def main():
                         )
     log = logging.getLogger(__name__)
     log.info("Starting GT02 Server...")
+
+    log.info("Reading config file: config.yaml")
+    global config
+    with open("config.yaml", 'r') as y:
+        config = yaml.load(y)
+    log.debug("Config: " + str(config))
 
     # Create a socket server
     try:

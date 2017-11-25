@@ -1,0 +1,10 @@
+mqtt:
+  broker: <broker ip or hostname>
+  port: <broker port>
+  username: <username>
+  password: <password>
+
+imei:
+  <imei>: 
+    device: <devicename>
+    tid: <tid>
