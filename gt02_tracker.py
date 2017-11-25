@@ -1,9 +1,15 @@
+#!/usr/bin/python3
+# coding=utf-8
+#
 import threading
 import socketserver
 import select
 import struct
 import logging
 import datetime
+import time
+import json
+import paho.mqtt.publish as publish
 from crc import CRC_GT02
 
 
@@ -21,6 +27,7 @@ def parse_location(data):
     minute = data[4]
     second = data[5]
     dt = datetime.datetime(year, month, day, hour, minute, second)
+    tst = time.mktime(dt.timetuple())
     log.debug("Datetime: " + str(dt))
     # GPS Quality
     bit_length = (data[6] & 0xf0) >> 4
@@ -97,6 +104,7 @@ def parse_location(data):
               )
     info = {
             'datetime': dt,
+            'timestamp': tst,
             'lat': lat_dd,
             'lon': lon_dd,
             'position': loc_txt,
@@ -193,6 +201,10 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
         done = False
         imei = None
         crc16 = CRC_GT02()
+        tls_settings = {
+               'ca_certs': 'fullchain.pem',
+               'tls_version': ssl.PROTOCOL_TLSv1
+               }
 
         while not done:
             log.debug("Blocking on incoming data")
@@ -266,6 +278,34 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                             # Location Data
                             log.debug("Location packet received")
                             info = parse_location(payload)
+                            log.debug("Extracted: " + str(info))
+                            owntracks = {
+                                         '_type': 'location',
+                                         'tid': 'HX',  # TODO: perform lookup
+                                         'imei': imei,
+                                         'lat': info['lat'],
+                                         'lon': info['lon'],
+                                         'cog': info['heading'],
+                                         'vel': info['speed'],
+                                         'tst': info['timestamp']
+                                         }
+                            if not info['locked'] or info['satellites'] < 4:
+                                owntracks['acc'] = 10000
+                            else:
+                                # This is a guestimate
+                                owntracks['acc'] = 300 / info.satellites
+
+                            # Publish to mqtt
+                            log.debug("Sending via mqtt: " + str(owntracks))
+                            # TODO Provide config in another file
+                            publish.single(
+                                           "owntracks/" + imei + "/HX",
+                                           tls = tls_settings,
+                                           json.dumps(owntracks),
+                                           hostname = 'geo-fun.org',
+                                           port = 8883
+                                           )
+                            log.debug("Sent successfully")
 
                         elif protocol == 0x13:
                             # Status Information
