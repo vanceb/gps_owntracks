@@ -4,6 +4,9 @@ mqtt:
   username: <username>
   password: <password>
 
+tls:
+  ca_certs: ca.pem
+
 imei:
   <imei>: 
     device: <devicename>

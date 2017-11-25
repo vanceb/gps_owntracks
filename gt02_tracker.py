@@ -10,6 +10,7 @@ import datetime
 import time
 import json
 import yaml
+import ssl
 import paho.mqtt.publish as publish
 from crc import CRC_GT02
 
@@ -209,10 +210,12 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                 'username': config['mqtt']['username'],
                 'password': config['mqtt']['password']
                 }
-        #tls = {
-        #       'ca_certs': 'fullchain.pem',
-        #       'tls_version': ssl.PROTOCOL_TLSv1
-        #       }
+        if 'tls' in config:
+            tls = {
+                   'ca_certs': config['tls']['ca_certs']
+                   }
+        else:
+            tls = None
 
         while not done:
             log.debug("Blocking on incoming data")
@@ -315,7 +318,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                             publish.single(
                                            "owntracks/" + device + "/" + tid,
                                            payload = json.dumps(owntracks),
-                                           #tls = tls,
+                                           tls = tls,
                                            auth = auth,
                                            hostname = broker,
                                            port = int(port)
