@@ -1,8 +1,8 @@
 version: '2'
 services:
   gt02_tracker:
-    image: vanceb/gt02_tracker
-    container_name: gt02_tracker
+    image: vanceb/gps_owntracks
+    container_name: gps_owntracks
     ports:
       - "9000:9000/tcp"
     restart: always
