@@ -1,0 +1,11 @@
+version: '2'
+services:
+  gt02_tracker:
+    image: vanceb/gt02_tracker
+    container_name: gt02_tracker
+    ports:
+      - "9000:9000/tcp"
+    restart: always
+    volumes:
+      - /data/gt02_tracker:/code/logs
+    dns: 192.168.88.1

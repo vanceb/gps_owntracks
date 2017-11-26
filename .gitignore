@@ -101,4 +101,7 @@ ENV/
 .mypy_cache/
 
 # Credentials files
-config.yaml
+code/config.yaml
+
+# Logs directory
+code/logs/

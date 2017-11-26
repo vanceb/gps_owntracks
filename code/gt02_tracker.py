@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 # coding=utf-8
 #
+import os
 import threading
 import socketserver
 import select
 import struct
 import logging
+import logging.config
 import datetime
 import time
 import json
@@ -17,6 +19,22 @@ from crc import CRC_GT02
 
 THREAD_TIMEOUT = 120  # seconds
 config = {}  # Global variable for the config
+
+
+# Load logging config from logging.yaml
+def setup_logging(default_path='logging.yaml', default_level=logging.INFO, env_key='LOG_CFG'):
+    path = default_path
+    value = os.getenv(env_key, None)
+    if value:
+        path = value
+    if os.path.exists(path):
+        with open(path, 'rt') as f:
+            config = yaml.load(f)
+        logging.config.dictConfig(config)
+        logging.info("Configured logging from yaml")
+    else:
+        logging.basicConfig(level=default_level)
+        logging.info("Configured logging basic")
 
 
 def parse_location(data):
@@ -79,7 +97,7 @@ def parse_location(data):
     loc_txt = str(lat_deg) + "° "
     loc_txt += format(lat_min, '02.4f') + "'" + lat_hemi + " "
     loc_txt += str(lon_deg) + "° "
-    loc_txt += format(lon_min, '02.4f') + "'" + lon_hemi
+    loc_txt += format(lon_min, '03.4f') + "'" + lon_hemi
     # Correct the decimal degrees sign if needed
     if lat_hemi == 'S':
         lat_dd = -lat_dd
@@ -88,11 +106,23 @@ def parse_location(data):
     log.debug("DD: " + str(lat_dd) + " " + str(lon_dd))
     # Log position and movement
     if speed < 1:
-        log.info("Static Location: " + loc_txt)
+        log.info("Static Location: " +
+                 str(dt) +
+                 " (" + format(lat_dd, '02.4f') + ", " +
+                 format(lon_dd, '03.4f') + "), " +
+                 loc_txt +
+                 " [" + str(num_sats) + "]"
+                 )
     else:
-        log.info("Moving at " + str(speed) +
+        log.info("Moving, Location: " +
+                 str(dt) +
+                 " (" + format(lat_dd, '02.4f') + ", " +
+                 format(lon_dd, '03.4f') + "), " +
+                 loc_txt +
+                 " speed " + str(speed) +
                  " kph, heading " + str(direction_deg) +
-                 ". Position " + loc_txt)
+                 " [" + str(num_sats) + "]"
+                 )
 
     # GSM Info
     mcc = (data[17] << 8) & data[18]
@@ -157,17 +187,17 @@ def parse_status(data):
         ignition = False
 
     if info & 0x01:
-        active = True
-    else:
         active = False
+    else:
+        active = True
 
-    log.info("Vehicle:" +
+    log.debug("Vehicle:" +
              " Immobilised - " + str(immobilised) +
              " Ingition on - " + str(ignition) +
              " Alarm 1 - " + str(alarm) +
              " Alarm 2 - " + str(alarm_lang)
              )
-    log.info("System:"
+    log.debug("System:"
              " Active - " + str(active) +
              " Tracking - " + str(tracking) +
              " Charging - " + str(charging) +
@@ -197,7 +227,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
         Build a response from an incoming GT06 protocol GPS Tracker packet
         """
         log = logging.getLogger(__name__)
-        log.info("New processing thread started: "
+        log.debug("New processing thread started: "
                  + threading.current_thread().name
                  )
 
@@ -222,7 +252,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
             ready = select.select([self.request], [], [], THREAD_TIMEOUT)
             if not ready[0]:
                 # Timeout has occured and we are done
-                log.info("No message received for " + str(THREAD_TIMEOUT) +
+                log.debug("No message received for " + str(THREAD_TIMEOUT) +
                          " seconds, " + threading.current_thread().name +
                          " exiting")
                 done = True
@@ -231,7 +261,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                 if not b:
                     # If we get zero length data from this call then the
                     # socket is closed, so we are done!
-                    log.info("Thread "
+                    log.debug("Thread "
                              + threading.current_thread().name()
                              + " ending, socket closed")
                     done = True
@@ -281,13 +311,16 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                             if imei is None:
                                 imei = ''.join(
                                         format(x, '02x') for x in payload)
-                                log.info("Login from " + imei)
                                 if imei in config['imei']:
                                     device = config['imei'][imei]['device']
                                     tid = config['imei'][imei]['tid']
                                 else:
                                     device = imei
                                     tid = imei[-2:]
+                                log.info("Login from " + imei + 
+                                         " reporting as owntracks/" +
+                                         device + "/" + tid
+                                         )
                             else:
                                 log.error("Multiple login attempts")
                                 done = True
@@ -327,8 +360,16 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
 
                         elif protocol == 0x13:
                             # Status Information
-                            log.warning("Status packet received")
+                            log.debug("Status packet received")
                             info = parse_status(payload)
+                            log.info("Status: " +
+                                     "Active: " +
+                                     str(info["active"]) +
+                                     ", Tracking: " +
+                                     str(info["tracking"]) +
+                                     ", GSM Signal: " +
+                                     str(info["signal"])
+                                     )
                         elif protocol == 0x15:
                             # String Information
                             log.warning("String packet received - " +
@@ -368,10 +409,7 @@ class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def main():
 
-    logging.basicConfig(format='%(asctime)s ' +
-                               '%(name)s:%(levelname)s:%(message)s',
-                               level=logging.DEBUG
-                        )
+    setup_logging()
     log = logging.getLogger(__name__)
     log.info("Starting GT02 Server...")
 
