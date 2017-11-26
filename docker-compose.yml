@@ -7,5 +7,5 @@ services:
       - "9000:9000/tcp"
     restart: always
     volumes:
-      - /data/gt02_tracker:/code/logs
+      - /data/gt02_tracker/logs:/code/logs
     dns: 192.168.88.1
