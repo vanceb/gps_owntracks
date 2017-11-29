@@ -37,6 +37,108 @@ def setup_logging(default_path='logging.yaml', default_level=logging.INFO, env_k
         logging.info("Configured logging basic")
 
 
+# Load config from yaml file
+def load_config(path='config.yaml'):
+    config = None
+    log = logging.getLogger(__name__)
+    if os.path.exists(path):
+        log.debug("Loading config from: " + str(path))
+        with open("config.yaml", 'r') as y:
+            config = yaml.load(y)
+        log.debug("Config: " + str(config))
+    else:
+        log.error("Config file not found: " + path)
+    return config
+
+
+def validate_gt02(data):
+    log = logging.getLogger(__name__)
+    crc16 = CRC_GT02()
+    bad_data = False
+    log.debug("Data: " + ' '.join(format(x, '02x') for x in data))
+    # Process the data we just got
+    data_length = len(data)
+    if data_length > 10:
+        # Could be a valid packet
+        # Check start
+        start = data[0:2]
+        if start != b'\x78\x78':
+            log.error("Bad start to received data packet")
+            bad_data = True
+
+        # Confirm correct data length
+        length = data[2]
+        calc_length = data_length - 5
+        if length != calc_length:
+            log.error("Length mismatch -" +
+                      " Calculated: " + str(calc_length) +
+                      ", Supplied: " + str(length))
+            bad_data = True
+
+        # Confirm checksum
+        crc = data[-4:-2]
+        to_crc = data[2:-4]
+        calc_crc = crc16.crcb(to_crc)
+        if calc_crc != crc:
+            log.error("Checksum mismatch -" +
+                      " Calculated: %02x, Supplied: %02x"
+                      % (calc_crc, crc))
+            bad_data = True
+
+        # Check ending bytes
+        end = data[-2:]
+        if end != b'\r\n':
+            log.error("Ending bytes are incorrect")
+            bad_data = True
+    else:
+        # Data packet is too short to be valid
+        bad_data = True
+
+    if not bad_data:
+        protocol = data[3]
+        payload = data[4:-6]
+        serial = data[-6:-4]
+        # Build a response packet
+        response_payload = b'\x05' + \
+                           bytes([protocol,
+                                 serial[0],
+                                 serial[1]]
+                                 )
+        response_crc = crc16.crcb(response_payload)
+        response = b'\x78\x78' \
+                   + response_payload \
+                   + response_crc \
+                   + b'\x0d\x0a'
+        return {'protocol': protocol,
+                'payload': payload,
+                'serial': serial,
+                'response': response
+                }
+    else:
+        return None
+
+
+def parse_login(data):
+    log = logging.getLogger(__name__)
+    auth = {'ok': False}
+    imei = ''.join(format(x, '02x') for x in data)
+    auth['imei'] = imei
+    if imei in config['imei']:
+        device = config['imei'][imei]['device']
+        tid = config['imei'][imei]['tid']
+        topic = "owntracks/" + device + "/" + tid
+        log.info("Login from " + imei + 
+                 " reporting as " + topic
+                 )
+        auth['ok'] = True
+        auth['topic'] = topic
+        auth['device'] = device
+        auth['tid'] = tid
+    else:
+        log.error("Unknown device: " + imei)
+    return auth
+
+
 def parse_location(data):
     log = logging.getLogger(__name__)
     log.debug("Parsing location packet")
@@ -232,14 +334,13 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                  )
 
         done = False
-        imei = None
-        crc16 = CRC_GT02()
+        # mqtt broker information
         broker = config['mqtt']['broker']
         port = config['mqtt']['port']
-        auth = {
-                'username': config['mqtt']['username'],
-                'password': config['mqtt']['password']
-                }
+        mqtt_auth = {
+                     'username': config['mqtt']['username'],
+                     'password': config['mqtt']['password']
+                    }
         if 'tls' in config:
             tls = {
                    'ca_certs': config['tls']['ca_certs']
@@ -247,7 +348,9 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
         else:
             tls = None
 
+        auth = None
         while not done:
+            # Loop until we signal exit by no or bad data
             log.debug("Blocking on incoming data")
             ready = select.select([self.request], [], [], THREAD_TIMEOUT)
             if not ready[0]:
@@ -257,6 +360,7 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                          " exiting")
                 done = True
             else:
+                # We didn't timeout
                 b = self.request.recv(260)
                 if not b:
                     # If we get zero length data from this call then the
@@ -266,73 +370,30 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                              + " ending, socket closed")
                     done = True
                 else:
-                    bad_data = False
-                    log.debug("Data: " + ' '.join(format(x, '02x') for x in b))
-                    # Process the data we just got
-                    start = b[0:2]
-                    length = b[2]
-                    protocol = b[3]
-                    payload = b[4:-6]
-                    serial = b[-6:-4]
-                    crc = b[-4:-2]
-                    end = b[-2:]
-                    to_crc = b[2:-4]
-                    calc_length = len(b) - 5
-                    calc_crc = crc16.crcb(to_crc)
+                    # We got some data
+                    content = validate_gt02(b)
+                    if content is not None:
+                        # It looked like a valid packet
+                        if auth is None:
+                            # Not yet authorised so only allow login
+                            if content['protocol'] == 0x01:
+                                # Login
+                                auth = parse_login(content['payload'])
+                                if auth['ok'] is not True:
+                                    # Either bad data or we don't recognise imei
+                                    done = True
 
-                    # Check start
-                    if start != b'\x78\x78':
-                        log.error("Bad start to received data packet")
-                        bad_data = True
-
-                    # Confirm correct data length
-                    if length != calc_length:
-                        log.error("Length mismatch -" +
-                                  " Calculated: " + str(calc_length) +
-                                  ", Supplied: " + str(length))
-                        bad_data = True
-
-                    # Confirm checksum
-                    if calc_crc != crc:
-                        log.error("Checksum mismatch -" +
-                                  " Calculated: %02x, Supplied: %02x"
-                                  % (calc_crc, crc))
-                        bad_data = True
-
-                    # Check ending bytes
-                    if end != b'\r\n':
-                        log.error("Ending bytes are incorrect")
-                        bad_data = True
-
-                    if not bad_data:
-                        # Deal with the message content based on the protocol
-                        if protocol == 0x01:
-                            # Login request
-                            if imei is None:
-                                imei = ''.join(
-                                        format(x, '02x') for x in payload)
-                                if imei in config['imei']:
-                                    device = config['imei'][imei]['device']
-                                    tid = config['imei'][imei]['tid']
-                                else:
-                                    device = imei
-                                    tid = imei[-2:]
-                                log.info("Login from " + imei + 
-                                         " reporting as owntracks/" +
-                                         device + "/" + tid
-                                         )
-                            else:
-                                log.error("Multiple login attempts")
-                                done = True
-                        elif protocol == 0x12:
+                        # We must be authorised, so look at other protocols
+                        elif content['protocol'] == 0x12:
                             # Location Data
                             log.debug("Location packet received")
-                            info = parse_location(payload)
+                            # Extract data from payload
+                            info = parse_location(content['payload'])
                             log.debug("Extracted: " + str(info))
                             owntracks = {
                                          '_type': 'location',
-                                         'tid': tid,
-                                         'imei': imei,
+                                         'tid': auth['tid'],
+                                         'imei': auth['imei'],
                                          'lat': info['lat'],
                                          'lon': info['lon'],
                                          'cog': info['heading'],
@@ -347,21 +408,24 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                                         / info['satellites'])
 
                             # Publish to mqtt
-                            log.debug("Sending via mqtt: " + str(owntracks))
+                            log.debug("Sending via mqtt: " +
+                                      auth['topic'] + " " +
+                                      str(owntracks)
+                                      )
                             publish.single(
-                                           "owntracks/" + device + "/" + tid,
+                                           auth['topic'],
                                            payload = json.dumps(owntracks),
                                            tls = tls,
-                                           auth = auth,
+                                           auth = mqtt_auth,
                                            hostname = broker,
                                            port = int(port)
                                            )
                             log.debug("Sent successfully")
 
-                        elif protocol == 0x13:
+                        elif content['protocol'] == 0x13:
                             # Status Information
                             log.debug("Status packet received")
-                            info = parse_status(payload)
+                            info = parse_status(content['payload'])
                             log.info("Status: " +
                                      "Active: " +
                                      str(info["active"]) +
@@ -370,37 +434,35 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
                                      ", GSM Signal: " +
                                      str(info["signal"])
                                      )
-                        elif protocol == 0x15:
+
+                        elif content['protocol'] == 0x15:
                             # String Information
                             log.warning("String packet received - " +
                                         "NOT IMPLEMENTED")
-                        elif protocol == 0x16:
+
+                        elif content['protocol'] == 0x16:
                             # Alarm Information
                             log.warning("Alarm packet received - " +
                                         "NOT IMPLEMENTED")
-                        elif protocol == 0x1A:
+
+                        elif content['protocol'] == 0x1A:
                             # GPS query by phone
                             log.warning("GPS query by phone packet received - "
                                         + "NOT IMPLEMENTED")
-                        else:
-                            log.error("Unknown protocol: " + str(protocol))
 
-                        # Build a response packet
-                        response_payload = b'\x05' + \
-                                           bytes([protocol,
-                                                 serial[0],
-                                                 serial[1]]
-                                                 )
-                        response_crc = crc16.crcb(response_payload)
-                        response = b'\x78\x78' \
-                                   + response_payload \
-                                   + response_crc \
-                                   + b'\x0d\x0a'
-                        log.debug("Response packet: " +
-                                  ' '.join(format(x, '02x') for x in response))
-                        self.request.send(response)
+                        else:
+                            log.error("Unknown protocol: " +
+                                      str(content['protocol']))
+                            done = True
+
+                        if not done:
+                            log.debug("Response packet: " +
+                                      ' '.join(format(x, '02x') for x in
+                                          content['response']))
+                            self.request.send(content['response'])
                     else:
-                        log.error("Bad data received, discarding")
+                        done = True
+                        log.error("Bad data received")
 
 
 class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -415,9 +477,7 @@ def main():
 
     log.info("Reading config file: config.yaml")
     global config
-    with open("config.yaml", 'r') as y:
-        config = yaml.load(y)
-    log.debug("Config: " + str(config))
+    config = load_config()
 
     # Create a socket server
     try:
