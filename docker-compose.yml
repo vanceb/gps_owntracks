@@ -1,7 +1,7 @@
 version: '2'
 services:
   gt02_tracker:
-    image: vanceb/gps_owntracks
+    image: vanceb/gps_owntracks:latest
     container_name: gps_owntracks
     ports:
       - "9000:9000/tcp"
