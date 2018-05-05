@@ -43,7 +43,7 @@ def load_config(path='config.yaml'):
     log = logging.getLogger(__name__)
     if os.path.exists(path):
         log.debug("Loading config from: " + str(path))
-        with open("config.yaml", 'r') as y:
+        with open(path, 'r') as y:
             config = yaml.load(y)
         log.debug("Config: " + str(config))
     else:
